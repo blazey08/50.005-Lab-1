@@ -32,7 +32,6 @@ void task(long duration)
 
     
     //unlock semaphore
-    printf("Did sempost for global data");
     sem_post(sem_global_data);
 }
 
