@@ -32,6 +32,7 @@ void task(long duration)
 
     
     //unlock semaphore
+    printf("Did sempost for global data");
     sem_post(sem_global_data);
 }
 
@@ -55,7 +56,7 @@ void job_dispatch(int i){
 
         // c. If there's new job, execute the job accordingly: either by calling task(), usleep, exit(3) or kill(getpid(), SIGKILL)
         // jobs that are not termination jobs
-        if (shmPTR_jobs_buffer[i].task_status != -1) {
+        if (shmPTR_jobs_buffer[i].task_status != 0) {
             if (shmPTR_jobs_buffer[i].task_type == 't') {
                 task(shmPTR_jobs_buffer[i].task_duration);
                 shmPTR_jobs_buffer[i].task_status = 0; // job cleared
@@ -116,25 +117,20 @@ void setup()
     sem_global_data = sem_open("semglobaldata", O_CREAT | O_EXCL, 0644, 1);
 
     //Loop to check if failed
-    while (true)
-    {
-        if (sem_global_data == SEM_FAILED)
-        {
+    while (true){
+        if (sem_global_data == SEM_FAILED){
             sem_unlink("semglobaldata");
             sem_global_data = sem_open("semglobaldata", O_CREAT | O_EXCL, 0644, 1);
         }
-        else
-        {
+        else{
             break;
         }
     }
 
     //Setting up shared memory for  each job struct, followed the example given by global data shared memory above
-    for (int i = 0; i < number_of_processes; i++)
-    {
+    for (int i = 0; i < number_of_processes; i++){
         ShmID_jobs = shmget(IPC_PRIVATE, sizeof(job) * number_of_processes, IPC_CREAT | 0666);
-        if (ShmID_jobs == -1)
-        {
+        if (ShmID_jobs == -1){
             printf("Jobs shared memory creation failed\n");
             exit(EXIT_FAILURE);
         }
@@ -234,65 +230,33 @@ void main_loop(char *fileName)
 
         //keep track of whether new job has been run
         bool track_slot = false;
-
         while (true)
         {
             for (int i = 0; i < number_of_processes; i++)
             {
-
                 int alive = waitpid(children_processes[i], NULL, WNOHANG);
                 int job_status = shmPTR_jobs_buffer[i].task_status;
-
                 if (alive == 0 && job_status == 0)
                 {
                     //check process is still alive and previous task is done
                     shmPTR_jobs_buffer[i].task_duration = num;
                     shmPTR_jobs_buffer[i].task_status = 1;
                     shmPTR_jobs_buffer[i].task_type = action;
-                    sem_post(sem_jobs_buffer[i]);
                     track_slot = true;
+                    sem_post(sem_jobs_buffer[i]);
                     break;
                 }
-                else if (alive == 0 && job_status == 1)
+                else if (alive != 0)
                 {
-                    //ignore
-                }
-                else if (alive != 0 && job_status == 0)
-                {
-                    //process is not alive but previous task is done
-                    children_processes[i] = fork();
+                    //process is not alive
+                    pid_t child_revive = fork();
 
-                    if (children_processes[i] == 0)
-                    {
+                    if (child_revive == 0){
                         job_dispatch(i);
-                    }
-
-                    if (children_processes[i] > 0)
-                    {
-                        //parent, child done with process
-                        shmPTR_jobs_buffer[i].task_duration = num;
-                        shmPTR_jobs_buffer[i].task_status = 1;
-                        shmPTR_jobs_buffer[i].task_type = action;
-                        sem_post(sem_jobs_buffer[i]);
-                        track_slot = true;
-                        break;
-                    }
-                }
-                else if (job_status == 1 && alive != 0)
-                {
-                    children_processes[i] = fork();
-                    if (children_processes[i] == 0)
-                    {
-                        job_dispatch(i);
-                    }
-                    else if (children_processes[i] > 0)
-                    {
-                        shmPTR_jobs_buffer[i].task_duration = num;
-                        shmPTR_jobs_buffer[i].task_status = 1;
-                        shmPTR_jobs_buffer[i].task_type = action;
-                        sem_post(sem_jobs_buffer[i]);
-                        track_slot = true;
-                        break;
+                    }else if (child_revive > 0){
+                        children_processes[i] = child_revive;
+                    }else{
+                        printf( "Failed to create fork");
                     }
                 }
             }
@@ -310,21 +274,30 @@ void main_loop(char *fileName)
 
     // TODO#4: Design a way to send termination jobs to ALL worker that are currently alive
     //ensure that process has finished job before killing
-    for (int k = 0; k < number_of_processes; k++)
-    {
-        if (waitpid(children_processes[k], NULL, WNOHANG) == 0 && shmPTR_jobs_buffer[k].task_status == 0)
+    while(true){
+        int count = 0;
+        for (int k = 0; k < number_of_processes; k++)
         {
-            //killing process
-            shmPTR_jobs_buffer[k].task_duration = 0;
-            shmPTR_jobs_buffer[k].task_status = 1;
-            shmPTR_jobs_buffer[k].task_type = 'z';
-            sem_post(sem_jobs_buffer[k]);
+            if (waitpid(children_processes[k], NULL, WNOHANG) == 0){   
+                if(shmPTR_jobs_buffer[k].task_status == 0){
+                    //killing process
+                    shmPTR_jobs_buffer[k].task_duration = 0;
+                    shmPTR_jobs_buffer[k].task_status = 1;
+                    shmPTR_jobs_buffer[k].task_type = 'z';
+                    sem_post(sem_jobs_buffer[k]);
+                    count++;
+                }
+            }else{
+                count++;
+            }  
         }
-        else if (shmPTR_jobs_buffer[k].task_status != 0)
-        {
-            k--;
+
+        if(count == number_of_processes){
+            break;
         }
     }
+    
+    
 
     //wait for all children processes to properly execute the 'z' termination jobs
     int process_waited_final = 0;
@@ -346,43 +319,25 @@ void cleanup()
     // 3. Unlink all semaphores in sem_jobs_buffer
 
     //detach and remove shared memory locations
-    int detach_status = shmdt((void *)ShmPTR_global_data); //detach
-    if (detach_status == -1)
-        printf("Detach shared memory global_data ERROR\n");
+    int detach_status = shmdt((void *) ShmPTR_global_data); //detach
+    if (detach_status == -1) printf("Detach shared memory global_data ERROR\n");
     int remove_status = shmctl(ShmID_global_data, IPC_RMID, NULL); //delete
-    if (remove_status == -1)
-        printf("Remove shared memory global_data ERROR\n");
-    detach_status = shmdt((void *)shmPTR_jobs_buffer); //detach
-    if (detach_status == -1)
-        printf("Detach shared memory jobs ERROR\n");
+    if (remove_status == -1) printf("Remove shared memory global_data ERROR\n");
+    detach_status = shmdt((void *) shmPTR_jobs_buffer); //detach
+    if (detach_status == -1) printf("Detach shared memory jobs ERROR\n");
     remove_status = shmctl(ShmID_jobs, IPC_RMID, NULL); //delete
-    if (remove_status == -1)
-        printf("Remove shared memory jobs ERROR\n");
+    if (remove_status == -1) printf("Remove shared memory jobs ERROR\n");
 
     //unlink all semaphores before exiting process
     int sem_close_status = sem_unlink("semglobaldata");
-    if (sem_close_status == 0)
-    {
-        //printf("Semaphore globaldata closes succesfully.\n");
-    }
-    else
-    {
-        printf("Semaphore globaldata fails to close.\n");
-    }
-
-    for (int i = 0; i < number_of_processes; i++)
-    {
-        char *sem_name = malloc(sizeof(char) * 16);
+    // only check if failed to close, no need print if closed properly.
+    if (sem_close_status != 0) printf("Semaphore globaldata fails to close.\n");
+    for (int i = 0; i<number_of_processes; i++){
+        char *sem_name = malloc(sizeof(char)*16);
         sprintf(sem_name, "semjobs%d", i);
         sem_close_status = sem_unlink(sem_name);
-        if (sem_close_status == 0)
-        {
-            //printf("Semaphore jobs %d closes succesfully.\n", i);
-        }
-        else
-        {
-            printf("Semaphore jobs %d fails to close.\n", i);
-        }
+        // only check if failed to close, no need print if closed properly.
+        if (sem_close_status != 0)printf("Semaphore jobs %d fails to close.\n", i);
         free(sem_name);
     }
 }
